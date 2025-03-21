@@ -1,5 +1,6 @@
 import { MCPClientError } from '../../../errors';
 import { JSONRPCMessage } from './json-rpc-message';
+import { OAuthClientProvider } from './mcp-oauth';
 import { SseMCPTransport } from './mcp-sse-transport';
 
 /**
@@ -42,6 +43,7 @@ export interface MCPTransport {
 export interface SSEConfig {
   type: 'sse';
   url: string;
+  authProvider?: OAuthClientProvider;
 }
 export type MCPTransportConfig = SSEConfig;
 

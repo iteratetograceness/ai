@@ -9,6 +9,7 @@ import {
   JSONRPCRequest,
   JSONRPCResponse,
 } from './json-rpc-message';
+import { SseMCPTransport } from './mcp-sse-transport';
 import {
   createMcpTransport,
   isCustomMcpTransport,
@@ -66,7 +67,7 @@ export async function createMCPClient(
  * - Accepting notifications
  */
 class MCPClient {
-  private transport: MCPTransport;
+  public transport: MCPTransport;
   private onUncaughtError?: (error: unknown) => void;
   private clientInfo: ClientConfiguration;
   private requestMessageId = 0;
@@ -152,6 +153,15 @@ class MCPClient {
 
       return this;
     } catch (error) {
+      if (
+        error instanceof MCPClientError &&
+        error.message === 'MCP SSE Transport Error: Unauthorized' &&
+        this.transport instanceof SseMCPTransport
+      ) {
+        // User has been redirected:
+        throw error;
+      }
+
       await this.close();
       throw error;
     }

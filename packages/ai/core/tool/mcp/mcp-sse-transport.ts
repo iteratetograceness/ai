@@ -1,6 +1,7 @@
 import { EventSourceParserStream } from 'eventsource-parser/stream';
 import { MCPClientError } from '../../../errors';
 import { JSONRPCMessage, JSONRPCMessageSchema } from './json-rpc-message';
+import { authenticateMCPClient, OAuthClientProvider } from './mcp-oauth';
 import { MCPTransport } from './mcp-transport';
 
 export class SseMCPTransport implements MCPTransport {
@@ -11,31 +12,76 @@ export class SseMCPTransport implements MCPTransport {
   private sseConnection?: {
     close: () => void;
   };
+  private authProvider?: OAuthClientProvider;
 
   onclose?: () => void;
   onerror?: (error: unknown) => void;
   onmessage?: (message: JSONRPCMessage) => void;
 
-  constructor({ url }: { url: string }) {
+  constructor({
+    url,
+    authProvider,
+  }: {
+    url: string;
+    authProvider?: OAuthClientProvider;
+  }) {
     this.url = new URL(url);
+    this.authProvider = authProvider;
   }
 
   async start(): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
+    return new Promise<void>(async (resolve, reject) => {
       if (this.connected) {
         return resolve();
+      }
+
+      /**
+       * Attempt to auth (MCP waits to do this after connection is established and we get back a 401)
+       *
+       * Maybe: Throw special error to let user handle?
+       */
+      if (this.authProvider) {
+        const authResult = await authenticateMCPClient({
+          provider: this.authProvider,
+          serverUrl: this.url,
+        });
+
+        if (authResult === 'REDIRECT') {
+          return reject(
+            new MCPClientError({
+              message: 'MCP SSE Transport Error: Redirect',
+            }),
+          );
+        }
       }
 
       this.abortController = new AbortController();
 
       const establishConnection = async () => {
         try {
+          const headers = new Headers();
+          headers.set('Accept', 'text/event-stream');
+
+          if (this.authProvider) {
+            const tokens = await this.authProvider.tokens();
+            if (tokens) {
+              headers.set('Authorization', `Bearer ${tokens.access_token}`);
+            }
+          }
+
           const response = await fetch(this.url.href, {
-            headers: {
-              Accept: 'text/event-stream',
-            },
+            headers,
             signal: this.abortController?.signal,
           });
+
+          if (response.status === 401 && this.authProvider) {
+            // Or should we also retry auth here?
+            return reject(
+              new MCPClientError({
+                message: 'MCP SSE Transport Error: Unauthorized',
+              }),
+            );
+          }
 
           if (!response.ok || !response.body) {
             const error = new MCPClientError({
@@ -143,6 +189,14 @@ export class SseMCPTransport implements MCPTransport {
     try {
       const headers = new Headers();
       headers.set('Content-Type', 'application/json');
+
+      if (this.authProvider) {
+        const tokens = await this.authProvider.tokens();
+        if (tokens) {
+          headers.set('Authorization', `Bearer ${tokens.access_token}`);
+        }
+      }
+
       const init = {
         method: 'POST',
         headers,
@@ -151,6 +205,22 @@ export class SseMCPTransport implements MCPTransport {
       };
 
       const response = await fetch(this.endpoint, init);
+
+      if (response.status === 401 && this.authProvider) {
+        const authResult = await authenticateMCPClient({
+          provider: this.authProvider,
+          serverUrl: this.url,
+        });
+
+        if (authResult === 'AUTHORIZED') {
+          return this.send(message);
+        } else {
+          // This will silently fail, we need to throw again in catch:
+          throw new MCPClientError({
+            message: 'MCP SSE Transport Error: Unauthorized',
+          });
+        }
+      }
 
       if (!response.ok) {
         const text = await response.text().catch(() => null);
@@ -163,6 +233,23 @@ export class SseMCPTransport implements MCPTransport {
     } catch (error) {
       this.onerror?.(error);
       return;
+    }
+  }
+
+  // Called to complete the auth flow after redirection:
+  async finishAuth(authorizationCode: string): Promise<void> {
+    if (!this.authProvider) {
+      throw new MCPClientError({ message: 'No auth provider configured' });
+    }
+
+    const authResult = await authenticateMCPClient({
+      provider: this.authProvider,
+      serverUrl: this.url,
+      authorizationCode,
+    });
+
+    if (authResult !== 'AUTHORIZED') {
+      throw new MCPClientError({ message: 'Failed to complete authorization' });
     }
   }
 }
