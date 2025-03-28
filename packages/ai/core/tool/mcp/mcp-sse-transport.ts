@@ -1,6 +1,11 @@
 import { createEventSourceParserStream } from '@ai-sdk/provider-utils';
 import { MCPClientError } from '../../../errors';
 import { JSONRPCMessage, JSONRPCMessageSchema } from './json-rpc-message';
+import {
+  authorize,
+  OAuthClientProvider,
+  UnauthorizedError,
+} from './mcp-sse-auth-provider';
 import { MCPTransport } from './mcp-transport';
 
 export class SseMCPTransport implements MCPTransport {
@@ -12,6 +17,7 @@ export class SseMCPTransport implements MCPTransport {
     close: () => void;
   };
   private headers?: Record<string, string>;
+  private authProvider?: OAuthClientProvider;
 
   onclose?: () => void;
   onerror?: (error: unknown) => void;
@@ -20,12 +26,15 @@ export class SseMCPTransport implements MCPTransport {
   constructor({
     url,
     headers,
+    authProvider,
   }: {
     url: string;
     headers?: Record<string, string>;
+    authProvider?: OAuthClientProvider;
   }) {
     this.url = new URL(url);
     this.headers = headers;
+    this.authProvider = authProvider;
   }
 
   async start(): Promise<void> {
@@ -38,7 +47,7 @@ export class SseMCPTransport implements MCPTransport {
 
       const establishConnection = async () => {
         try {
-          const headers = new Headers(this.headers);
+          const headers = await this.getHeaders();
           headers.set('Accept', 'text/event-stream');
           const response = await fetch(this.url.href, {
             headers,
@@ -46,6 +55,12 @@ export class SseMCPTransport implements MCPTransport {
           });
 
           if (!response.ok || !response.body) {
+            if (response.status === 401) {
+              if (this.authProvider) {
+                this.authThenStart().then(resolve, reject);
+                return;
+              }
+            }
             const error = new MCPClientError({
               message: `MCP SSE Transport Error: ${response.status} ${response.statusText}`,
             });
@@ -125,6 +140,8 @@ export class SseMCPTransport implements MCPTransport {
             return;
           }
 
+          console.log('ESTABLISH CONNECTION ERROR');
+
           this.onerror?.(error);
           reject(error);
         }
@@ -132,6 +149,34 @@ export class SseMCPTransport implements MCPTransport {
 
       establishConnection();
     });
+  }
+
+  async authThenStart(): Promise<void> {
+    if (!this.authProvider) {
+      throw new MCPClientError({
+        message: 'MCP SSE Transport Error: No auth provider',
+      });
+    }
+
+    try {
+      console.log('[Auth] Authorizing...');
+      const result = await authorize({
+        provider: this.authProvider,
+        serverUrl: this.url,
+      });
+
+      console.log('[Auth] Result:', result);
+
+      if (result !== 'AUTHORIZED') {
+        console.error('MCP SSE Transport Error: Unauthorized');
+        throw new UnauthorizedError();
+      }
+
+      return this.start();
+    } catch (error) {
+      this.onerror?.(error as Error);
+      throw error;
+    }
   }
 
   async close(): Promise<void> {
@@ -149,7 +194,7 @@ export class SseMCPTransport implements MCPTransport {
     }
 
     try {
-      const headers = new Headers(this.headers);
+      const headers = await this.getHeaders();
       headers.set('Content-Type', 'application/json');
       const init = {
         method: 'POST',
@@ -172,6 +217,17 @@ export class SseMCPTransport implements MCPTransport {
       this.onerror?.(error);
       return;
     }
+  }
+
+  private async getHeaders(): Promise<Headers> {
+    const headers = new Headers(this.headers);
+    if (this.authProvider) {
+      const tokens = await this.authProvider.tokens();
+      if (tokens) {
+        headers.set('Authorization', `Bearer ${tokens.access_token}`);
+      }
+    }
+    return headers;
   }
 }
 

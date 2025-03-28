@@ -1,5 +1,6 @@
 import { MCPClientError } from '../../../errors';
 import { JSONRPCMessage } from './json-rpc-message';
+import { OAuthClientProvider } from './mcp-sse-auth-provider';
 import { SseMCPTransport } from './mcp-sse-transport';
 
 /**
@@ -51,6 +52,11 @@ export type MCPTransportConfig = {
    * Additional HTTP headers to be sent with requests.
    */
   headers?: Record<string, string>;
+
+  /**
+   * The auth provider to use for the transport.
+   */
+  authProvider?: OAuthClientProvider;
 };
 
 export function createMcpTransport(config: MCPTransportConfig): MCPTransport {
